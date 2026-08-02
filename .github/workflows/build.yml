@@ -1,1 +1,76 @@
+name: Flutter Build
 
+on:
+  workflow_dispatch:
+    inputs:
+      file_name:
+        description: "ZIP Project"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.32.8"
+          cache: true
+
+      - name: Prepare Project
+        run: |
+          mkdir project
+          cp uploads/${{ github.event.inputs.file_name }} project/project.zip
+
+      - name: Extract ZIP
+        run: |
+          cd project
+          unzip -oq project.zip
+          rm project.zip
+
+      - name: Find Flutter Project
+        run: |
+          PROJECT=$(find project -name pubspec.yaml | head -1 | xargs dirname)
+
+          if [ -z "$PROJECT" ]; then
+            echo "Flutter project not found"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT" >> $GITHUB_ENV
+
+      - name: Flutter Pub Get
+        run: |
+          cd $PROJECT_DIR
+          flutter pub get
+
+      - name: Build APK
+        run: |
+          cd $PROJECT_DIR
+          flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Delete Uploaded ZIP
+        if: always()
+        run: |
+          rm -f uploads/${{ github.event.inputs.file_name }}
