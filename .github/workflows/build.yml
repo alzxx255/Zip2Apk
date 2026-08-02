@@ -4,19 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       file_name:
-        description: "ZIP Project"
+        description: ZIP Project
         required: true
         type: string
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
-
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -34,21 +33,21 @@ jobs:
 
       - name: Prepare Project
         run: |
-          mkdir project
-          cp uploads/${{ github.event.inputs.file_name }} project/project.zip
+          mkdir -p project
+          cp "uploads/${{ github.event.inputs.file_name }}" project/project.zip
 
       - name: Extract ZIP
         run: |
           cd project
           unzip -oq project.zip
-          rm project.zip
+          rm -f project.zip
 
       - name: Find Flutter Project
         run: |
-          PROJECT=$(find project -name pubspec.yaml | head -1 | xargs dirname)
+          PROJECT=$(find project -name "pubspec.yaml" | head -1 | xargs dirname)
 
           if [ -z "$PROJECT" ]; then
-            echo "Flutter project not found"
+            echo "Flutter project not found!"
             exit 1
           fi
 
@@ -56,12 +55,12 @@ jobs:
 
       - name: Flutter Pub Get
         run: |
-          cd $PROJECT_DIR
+          cd "$PROJECT_DIR"
           flutter pub get
 
       - name: Build APK
         run: |
-          cd $PROJECT_DIR
+          cd "$PROJECT_DIR"
           flutter build apk --release
 
       - name: Upload APK
@@ -73,4 +72,4 @@ jobs:
       - name: Delete Uploaded ZIP
         if: always()
         run: |
-          rm -f uploads/${{ github.event.inputs.file_name }}
+          rm -f "uploads/${{ github.event.inputs.file_name }}"
