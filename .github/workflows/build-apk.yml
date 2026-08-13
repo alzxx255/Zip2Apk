@@ -1,0 +1,60 @@
+name: Build APK
+on:
+  repository_dispatch:
+    types: [build-apk]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⏳ Terima Data dari Bot
+        id: vars
+        run: |
+          echo "USER_ID=${{ github.event.client_payload.user_id }}" >> $GITHUB_ENV
+          echo "CHAT_ID=${{ github.event.client_payload.chat_id }}" >> $GITHUB_ENV
+          echo "PROJECT_NAME=${{ github.event.client_payload.project_name }}" >> $GITHUB_ENV
+
+      - name: 📥 Download ZIP dari Bot
+        uses: actions/checkout@v4
+
+      - name: 📦 Ekstrak Proyek
+        run: |
+          echo "${{ github.event.client_payload.zip_base64 }}" | base64 -d > proyek.zip
+          unzip -q proyek.zip -d proyek
+          rm proyek.zip
+
+      - name: 🛠️ Pasang Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: 'stable'
+
+      - name: 📦 Download Dependensi
+        working-directory: ./proyek
+        run: flutter pub get
+
+      - name: 🔨 Build APK
+        working-directory: ./proyek
+        run: flutter build apk --release
+
+      - name: ✅ Siap Kirim ke Telegram
+        id: apkpath
+        run: |
+          APK_FILE=$(find ./proyek/build -name "*.apk" | head -1)
+          echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
+          echo "APK_NAME=$(basename $APK_FILE)" >> $GITHUB_ENV
+
+      - name: 📤 Kirim APK ke Telegram
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ env.CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          file: ${{ env.APK_PATH }}
+          caption: |
+            ✅ BUILD SELESAI! 🎉
+            
+            📦 Proyek: ${{ env.PROJECT_NAME }}
+            📁 Nama File: ${{ env.APK_NAME }}
+            ✅ Status: Berhasil Dibuat
+            
+            Terima kasih sudah menggunakan Bot Build!
