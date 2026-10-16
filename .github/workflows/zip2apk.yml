@@ -1,0 +1,241 @@
+name: Flutter APK Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag containing source ZIP"
+        required: true
+        type: string
+      build_type:
+        description: "APK build type"
+        required: true
+        type: choice
+        options:
+          - release
+          - debug
+        default: release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.build_type }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Flutter ${{ inputs.build_type }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      BUILD_TYPE: ${{ inputs.build_type }}
+      SOURCE_DIR: ${{ github.workspace }}/source
+      LOG_DIR: ${{ github.workspace }}/build_logs
+      RAW_LOG: /tmp/flutter-build-full.log
+
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space (aggressive)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== DISK BEFORE ====="
+          df -h /
+          sudo rm -rf /usr/share/dotnet          || true
+          sudo rm -rf /usr/local/lib/android/sdk/ndk || true
+          sudo rm -rf /usr/local/lib/android/sdk/cmake || true
+          sudo rm -rf /opt/ghc                   || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost     || true
+          sudo rm -rf /usr/share/swift           || true
+          sudo rm -rf /usr/local/.ghcup          || true
+          sudo rm -rf /opt/hostedtoolcache/Ruby  || true
+          sudo rm -rf /opt/hostedtoolcache/node  || true
+          sudo rm -rf /opt/hostedtoolcache/go    || true
+          sudo rm -rf /opt/hostedtoolcache/PyPy  || true
+          sudo rm -rf /usr/lib/jvm/*zulu*        || true
+          sudo docker image prune -af            || true
+          sudo docker system prune -af --volumes || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*       || true
+          echo "===== DISK AFTER ====="
+          df -h /
+
+      - name: Prepare environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip gh
+          mkdir -p "$SOURCE_DIR" "$LOG_DIR"
+          : > "$RAW_LOG"
+          find "$LOG_DIR" -mindepth 1 -delete || true
+
+      - name: Download source ZIP
+        id: download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          gh release download "$RELEASE_TAG" \
+            --repo "$REPOSITORY" \
+            --pattern "*.zip" \
+            --clobber >> "$RAW_LOG" 2>&1
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: Tidak ada *.zip di release '$RELEASE_TAG'." | tee -a "$RAW_LOG"
+            exit 1
+          fi
+          unzip -o "$ZIP_FILE" >> "$RAW_LOG" 2>&1
+          rm -f "$ZIP_FILE"
+
+      - name: Detect Flutter project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t PUBSPEC_LIST < <(
+            find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
+              -not -path "*/build/*" \
+              -not -path "*/.git/*" \
+              -not -path "*/.pub/*"
+          )
+          PUBSPEC="${PUBSPEC_LIST[0]:-}"
+          if [ -z "$PUBSPEC" ]; then
+            echo "pubspec.yaml tidak ditemukan." | tee -a "$RAW_LOG"
+            exit 1
+          fi
+          PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
+          if [ ! -d "$PROJECT_ROOT/android" ]; then
+            echo "Folder android/ tidak ada di $PROJECT_ROOT" | tee -a "$RAW_LOG"
+            exit 1
+          fi
+          echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter 3.32.8
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.32.8"
+          channel: stable
+          cache: true
+
+      - name: Flutter clean
+        id: clean
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set +e
+          cd "$PROJECT_ROOT"
+          flutter clean >> "$RAW_LOG" 2>&1
+
+      - name: Flutter pub get
+        id: pubget
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set +e
+          cd "$PROJECT_ROOT"
+          flutter pub get >> "$RAW_LOG" 2>&1
+
+      - name: Fix Gradle Compatibility
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/android"
+          touch gradle.properties
+          grep -qxF 'android.newDsl=false' gradle.properties || echo 'android.newDsl=false' >> gradle.properties
+          grep -q '^org.gradle.jvmargs=' gradle.properties || echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G' >> gradle.properties
+
+      - name: Build APK
+        id: apk_build
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set +e
+          cd "$PROJECT_ROOT"
+          flutter build apk --"$BUILD_TYPE" >> "$RAW_LOG" 2>&1
+          exit $?
+
+      - name: Package APK
+        if: success()
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set -euo pipefail
+          APK_DIR="$PROJECT_ROOT/build/app/outputs/flutter-apk"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/apk_output"
+          mkdir -p "$OUTPUT_DIR"
+          find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" -exec cp {} "$OUTPUT_DIR/" \;
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.build_type }}
+          path: ${{ github.workspace }}/apk_output/*.apk
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Generate Clean Core Error Report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$LOG_DIR"
+          python3 - "/tmp/flutter-build-full.log" "$LOG_DIR/build-error.txt" <<'PY'
+          import os, sys
+
+          raw_path, report_path = sys.argv[1:3]
+          try:
+              with open(raw_path, encoding="utf-8", errors="replace") as f:
+                  lines = f.readlines()
+          except OSError:
+              lines = []
+
+          project_errors = []
+          for line in lines:
+              l = line.strip()
+              if any(noise in l for noise in ["creating:", "inflating:", "Extracting:", "Downloading", "Copying", "package:"]):
+                  continue
+              
+              is_error = any(kw in l for kw in ["Error", "error", "FAILURE", "Exception", "FAILED", "Could not", "Execution failed", "A problem occurred"])
+              has_code_error = any(p in l for p in [".dart", "build.gradle", "pubspec.yaml"]) and any(w in l.lower() for w in ["error", "failed", "expected", "undefined", "unresolved", "not found"])
+
+              if is_error or has_code_error:
+                  if l and l not in project_errors:
+                      project_errors.append(l)
+
+          project_errors = project_errors[:20]
+
+          if not project_errors:
+              content = "❌ BUILD FAILED\n\n(Tidak ada detail error spesifik yang terekam.)\n"
+          else:
+              # Jarak 1 baris kosong antar error menggunakan \n\n
+              error_items = [f"• {e}" for e in project_errors]
+              content = "❌ INTI ERROR BUILD APK:\n\n" + "\n\n".join(error_items) + "\n"
+
+          with open(report_path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print(content)
+          PY
