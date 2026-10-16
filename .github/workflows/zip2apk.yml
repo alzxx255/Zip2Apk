@@ -42,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ env.BUILD_TYPE }}
+  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.build_type != '' && inputs.build_type || (inputs.build_mode != '' && inputs.build_mode || 'release') }}
   cancel-in-progress: false
 
 jobs:
@@ -195,7 +195,6 @@ jobs:
         run: |
           set +e
           cd "$PROJECT_ROOT"
-          # Konversi otomatis ke huruf kecil (release/debug) agar valid di Flutter
           LOWER_BUILD_TYPE="$(echo "$RAW_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')"
           echo "Building APK with mode: $LOWER_BUILD_TYPE" | tee -a "$RAW_LOG"
           flutter build apk --"$LOWER_BUILD_TYPE" >> "$RAW_LOG" 2>&1
