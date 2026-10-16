@@ -1,12 +1,10 @@
 name: Flutter APK Builder
 
-run-name: ${{ inputs.tag }}
-
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag build unik dari bot"
+        description: "Release tag containing source ZIP"
         required: true
         type: string
       build_type:
@@ -17,18 +15,6 @@ on:
           - release
           - debug
         default: release
-      chat_id:
-        description: "ID chat Telegram tempat ZIP dikirim"
-        required: true
-        type: string
-      message_id:
-        description: "ID pesan ZIP"
-        required: true
-        type: string
-      file_name:
-        description: "Nama file ZIP"
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -84,39 +70,32 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip
+          sudo apt-get install -y unzip gh
           mkdir -p "$SOURCE_DIR" "$LOG_DIR"
           : > "$RAW_LOG"
           find "$LOG_DIR" -mindepth 1 -delete || true
 
-      - name: Install GramJS
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm install --no-save --no-audit --no-fund telegram >> "$RAW_LOG" 2>&1
-
-      - name: Download source ZIP dari Telegram
+      - name: Download source ZIP
         id: download
         shell: bash
         env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          GRAM_SESSION: ${{ secrets.GRAM_SESSION }}
-          CHAT_ID: ${{ inputs.chat_id }}
-          MESSAGE_ID: ${{ inputs.message_id }}
-          FILE_NAME: ${{ inputs.file_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          ZIP_PATH="$RUNNER_TEMP/source.zip"
-          if ! node tg_fetch.js "$CHAT_ID" "$MESSAGE_ID" "$ZIP_PATH" >> "$RAW_LOG" 2>&1; then
-            echo "ERROR: gagal download ZIP '$FILE_NAME' dari Telegram." | tee -a "$RAW_LOG"
-            tail -n 30 "$RAW_LOG"
+          cd "$SOURCE_DIR"
+          gh release download "$RELEASE_TAG" \
+            --repo "$REPOSITORY" \
+            --pattern "*.zip" \
+            --clobber >> "$RAW_LOG" 2>&1
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: Tidak ada *.zip di release '$RELEASE_TAG'." | tee -a "$RAW_LOG"
             exit 1
           fi
-          cd "$SOURCE_DIR"
-          unzip -o "$ZIP_PATH" >> "$RAW_LOG" 2>&1
-          rm -f "$ZIP_PATH"
+          unzip -o "$ZIP_FILE" >> "$RAW_LOG" 2>&1
+          rm -f "$ZIP_FILE"
 
       - name: Detect Flutter project
         id: project
@@ -238,7 +217,7 @@ jobs:
               l = line.strip()
               if any(noise in l for noise in ["creating:", "inflating:", "Extracting:", "Downloading", "Copying", "package:"]):
                   continue
-
+              
               is_error = any(kw in l for kw in ["Error", "error", "FAILURE", "Exception", "FAILED", "Could not", "Execution failed", "A problem occurred"])
               has_code_error = any(p in l for p in [".dart", "build.gradle", "pubspec.yaml"]) and any(w in l.lower() for w in ["error", "failed", "expected", "undefined", "unresolved", "not found"])
 
@@ -251,6 +230,7 @@ jobs:
           if not project_errors:
               content = "❌ BUILD FAILED\n\n(Tidak ada detail error spesifik yang terekam.)\n"
           else:
+              # Jarak 1 baris kosong antar error menggunakan \n\n
               error_items = [f"• {e}" for e in project_errors]
               content = "❌ INTI ERROR BUILD APK:\n\n" + "\n\n".join(error_items) + "\n"
 
