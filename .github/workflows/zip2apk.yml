@@ -1,102 +1,306 @@
-name: Advanced ZIP to APK Builder
+name: Build Android Flutter
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
   workflow_dispatch:
     inputs:
-      zip_filename:
-        description: 'Nama file ZIP (kosongkan jika ingin auto-detect)'
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+          - profile
+      flavor:
+        description: 'Flavor (opsional)'
         required: false
         default: ''
+        type: string
+
+env:
+  FLUTTER_VERSION: '3.24.0'
+  JAVA_VERSION: '17'
+  GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build APK from ZIP
+  # ============================
+  # JOB 1: ANALYZE & TEST
+  # ============================
+  analyze-and-test:
+    name: Analyze & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      # 1. Checkout repository
-      - name: 📥 Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
-
-      # 2. Setup Environment (Node, Java, Android SDK)
-      - name: 🟢 Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          fetch-depth: 0
 
-      - name: ☕ Setup Java JDK 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
 
-      - name: 🤖 Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
 
-      # 3. Deteksi dan Ekstrak ZIP
-      - name: 📦 Find and Extract ZIP
-        id: extract_zip
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze project
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run tests with coverage
+        run: flutter test --coverage --reporter expanded
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: coverage/lcov.info
+          fail_ci_if_error: false
+        continue-on-error: true
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  # ============================
+  # JOB 2: BUILD ANDROID APK & AAB
+  # ============================
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    needs: analyze-and-test
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      # ---- Setup keystore untuk signing release ----
+      - name: Decode Keystore
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          # Cari file .zip di root repo
-          ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
-          
-          if [ -z "$ZIP_FILE" ]; then
-            echo "❌ Tidak ada file ZIP ditemukan di root repo!"
-            exit 1
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/keystore.jks
+            echo "Keystore decoded successfully"
+          else
+            echo "⚠️ KEYSTORE_BASE64 not set, skipping keystore setup"
           fi
-          
-          echo "✅ Menemukan file: $ZIP_FILE"
-          echo "ZIP_NAME=$(basename $ZIP_FILE)" >> $GITHUB_OUTPUT
-          
-          # Buat folder www dan ekstrak
-          mkdir -p www
-          unzip -o "$ZIP_FILE" -d www/
-          
-          # Cek apakah ada folder tambahan di dalam zip (misal: project/index.html)
-          # Jika ada, pindahkan isinya ke root www
-          if [ -d "www/$(ls www | head -n 1)" ] && [ $(ls www | wc -l) -eq 1 ]; then
-            echo "📂 Memindahkan folder utama ke root www..."
-            mv www/*/* www/ 2>/dev/null || true
-            rm -rf www/*/
+
+      - name: Create key.properties
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_PASSWORD" ]; then
+            cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=keystore.jks
+          EOF
+            echo "key.properties created"
+          else
+            echo "⚠️ Keystore secrets not set, using debug signing"
           fi
 
-      # 4. Install Cordova dan Build
-      - name: 📱 Install Cordova
-        run: npm install -g cordova
+      - name: Build APK (Release)
+        run: flutter build apk --release --split-per-abi --no-tree-shake-icons
 
-      - name: 🏗️ Create Cordova Project
+      - name: Build APK (Universal)
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Build App Bundle (AAB)
+        run: flutter build appbundle --release --no-tree-shake-icons
+
+      - name: Rename APK files
         run: |
-          cordova create myapp com.example.myapp MyApp
-          cd myapp
-          
-          # Hapus www bawaan Cordova dan ganti dengan milik kita
-          rm -rf www
-          cp -r ../www ./www
-          
-          # Tambahkan platform Android
-          cordova platform add android
+          cd build/app/outputs/flutter-apk/
+          for file in app-*-release.apk; do
+            if [ -f "$file" ]; then
+              abi=$(echo "$file" | sed 's/app-\(.*\)-release.apk/\1/')
+              mv "$file" "app-${abi}-${{ github.sha }}.apk"
+            fi
+          done
+          mv app-release.apk app-universal-${{ github.sha }}.apk || true
+          ls -lh
 
-      - name: 🔨 Build APK (Debug)
+      - name: Rename AAB file
         run: |
-          cd myapp
-          cordova build android --debug
+          cd build/app/outputs/bundle/release/
+          mv app-release.aab app-release-${{ github.sha }}.aab || true
+          ls -lh
 
-      # 5. Upload APK sebagai Artifact
-      - name: 📤 Upload APK Artifact
+      # ---- Upload Artifacts ----
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: apk-build-${{ github.run_number }}
-          path: myapp/platforms/android/app/build/outputs/apk/debug/*.apk
+          name: android-apk-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
+          if-no-files-found: error
 
-      # 6. (Opsional) Buat Release Otomatis
-      - name: 🚀 Create GitHub Release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab-${{ github.sha }}
+          path: build/app/outputs/bundle/release/*.aab
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            build/app/outputs/logs/
+            android/.gradle/
+          retention-days: 7
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## 📱 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Flutter | \`${{ env.FLUTTER_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Java | \`${{ env.JAVA_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Output Files" >> $GITHUB_STEP_SUMMARY
+          find build/app/outputs/flutter-apk/ -name "*.apk" -exec ls -lh {} \; >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          find build/app/outputs/bundle/release/ -name "*.aab" -exec ls -lh {} \; >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+
+  # ============================
+  # JOB 3: CREATE RELEASE (untuk tag)
+  # ============================
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-android
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk-${{ github.sha }}
+          path: ./release-apk
+
+      - name: Download AAB artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-aab-${{ github.sha }}
+          path: ./release-aab
+
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Release APK v1.0.${{ github.run_number }}
-          files: myapp/platforms/android/app/build/outputs/apk/debug/*.apk
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            ./release-apk/*.apk
+            ./release-aab/*.aab
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================
+  # JOB 4: NOTIFIKASI (opsional)
+  # ============================
+  notify:
+    name: Notify Status
+    runs-on: ubuntu-latest
+    needs: [analyze-and-test, build-android]
+    if: always() && github.event_name == 'push'
+
+    steps:
+      - name: Send Telegram Notification
+        if: secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != ''
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            🚀 Build ${{ needs.build-android.result == 'success' && 'BERHASIL ✅' || 'GAGAL ❌' }}
+            
+            📦 Repo: ${{ github.repository }}
+            🌿 Branch: ${{ github.ref_name }}
+            📝 Commit: ${{ github.event.head_commit.message }}
+            👤 Author: ${{ github.actor }}
+            
+            🔗 Detail: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        continue-on-error: true
