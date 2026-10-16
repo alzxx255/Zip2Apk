@@ -10,15 +10,13 @@ on:
       build_type:
         description: "APK build type"
         required: false
-        type: choice
-        options:
-          - release
-          - debug
+        type: string
         default: release
       build_mode:
-        description: "APK build mode (alias)"
+        description: "APK build mode"
         required: false
         type: string
+        default: release
       chat_id:
         description: "Telegram Chat ID"
         required: false
@@ -44,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.build_type != '' && inputs.build_type || inputs.build_mode || 'release' }}
+  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ env.BUILD_TYPE }}
   cancel-in-progress: false
 
 jobs:
@@ -54,7 +52,7 @@ jobs:
     timeout-minutes: 90
 
     env:
-      BUILD_TYPE: ${{ inputs.build_type != '' && inputs.build_type || inputs.build_mode || 'release' }}
+      BUILD_TYPE: ${{ inputs.build_type != '' && inputs.build_type || (inputs.build_mode != '' && inputs.build_mode || 'release') }}
       SOURCE_DIR: ${{ github.workspace }}/source
       LOG_DIR: ${{ github.workspace }}/build_logs
       RAW_LOG: /tmp/flutter-build-full.log
@@ -193,10 +191,14 @@ jobs:
         shell: bash
         env:
           PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+          RAW_BUILD_TYPE: ${{ env.BUILD_TYPE }}
         run: |
           set +e
           cd "$PROJECT_ROOT"
-          flutter build apk --"$BUILD_TYPE" >> "$RAW_LOG" 2>&1
+          # Konversi otomatis ke huruf kecil (release/debug) agar valid di Flutter
+          LOWER_BUILD_TYPE="$(echo "$RAW_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')"
+          echo "Building APK with mode: $LOWER_BUILD_TYPE" | tee -a "$RAW_LOG"
+          flutter build apk --"$LOWER_BUILD_TYPE" >> "$RAW_LOG" 2>&1
           exit $?
 
       - name: Package APK
