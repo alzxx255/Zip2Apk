@@ -9,28 +9,52 @@ on:
         type: string
       build_type:
         description: "APK build type"
-        required: true
+        required: false
         type: choice
         options:
           - release
           - debug
         default: release
+      build_mode:
+        description: "APK build mode (alias)"
+        required: false
+        type: string
+      chat_id:
+        description: "Telegram Chat ID"
+        required: false
+        type: string
+      message_id:
+        description: "Telegram Message ID"
+        required: false
+        type: string
+      file_name:
+        description: "File name"
+        required: false
+        type: string
+      file_url:
+        description: "File URL"
+        required: false
+        type: string
+      file_size:
+        description: "File size"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.build_type }}
+  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.build_type != '' && inputs.build_type || inputs.build_mode || 'release' }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Flutter ${{ inputs.build_type }}
+    name: Flutter Build
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
     env:
-      BUILD_TYPE: ${{ inputs.build_type }}
+      BUILD_TYPE: ${{ inputs.build_type != '' && inputs.build_type || inputs.build_mode || 'release' }}
       SOURCE_DIR: ${{ github.workspace }}/source
       LOG_DIR: ${{ github.workspace }}/build_logs
       RAW_LOG: /tmp/flutter-build-full.log
@@ -191,7 +215,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: app-${{ inputs.build_type }}
+          name: app-${{ env.BUILD_TYPE }}
           path: ${{ github.workspace }}/apk_output/*.apk
           if-no-files-found: error
           retention-days: 7
@@ -230,7 +254,6 @@ jobs:
           if not project_errors:
               content = "❌ BUILD FAILED\n\n(Tidak ada detail error spesifik yang terekam.)\n"
           else:
-              # Jarak 1 baris kosong antar error menggunakan \n\n
               error_items = [f"• {e}" for e in project_errors]
               content = "❌ INTI ERROR BUILD APK:\n\n" + "\n\n".join(error_items) + "\n"
 
